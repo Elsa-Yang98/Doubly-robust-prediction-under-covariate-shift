@@ -1,4 +1,7 @@
-#source('conformal.pred.split.sl.R')
+rm(list = ls())
+## Run the simulation
+library(randomForest)
+library(SuperLearner)
 ## Load the airfoil data
 dat = read.table("airfoil.txt")
 dim(dat)
@@ -22,17 +25,8 @@ expit = function(u){
 }
 ## Exponential tilting functions
 w = function(x) {
-  #exp(x[,c(1,5)] %*% c(-1,1)) + x[,4]^2 *x[,3] + exp(x[,c(1,5)] %*% c(-1,1)) * x[,4]^2 *x[,3]
-  #exp(x[,c(1,5)] %*% c(-1,1))
-  #x[,c(1,5)] %*% c(-1,1)
-  #exp(x[,c(1,5)] %*% c(-1,1)) + x[,4]^(-2)*x[,3]
-  #x[,c(1,5)] %*% c(-1,1) * x[,4]^(-0.2)*x[,3]^(-2)
-  #expit(x%*% c(-1,0.5,-0.25,-0.1,1))
   exp(x%*% c(-1,0.5,-0.25,-0.1,1))
-  #exp(x%*% c(0,0,0,0,0))
 }
-
-
 
 
 wsample = function(wts, frac=1) {
@@ -48,35 +42,29 @@ wsample = function(wts, frac=1) {
 }
 
 method_r = c("SL.ridge")
-#method_pi = c("SL.mean","SL.glm","SL.nnet")
-# method_m = c("SL.mean","SL.kernelKnn","SL.glm","SL.nnet")
-
-#method_r = c("SL.mean")
 method_pi = c("SL.mean","SL.randomForest","SL.glm")
 method_m = c("SL.mean","SL.randomForest","SL.glm")
 
-## Run the simulation
-library(randomForest)
-#library("conformalInference")
-library(SuperLearner)
 
-#To source, this is the modified function for the WCP method to train the residuals efficiently using SuperLearner
+
+#This is the modified function for the WCP method to train the residuals efficiently using SuperLearner
 #In their original code they only use least squares to estimate the residuals
-#utilize the prediction and the residuals fitted before
-conformal.pred.sl.fast <- function (x,x0,ind_train0,m=1,pred,res, alpha=0.1,w=NULL){
+#utilize the prediction and the residuals fitted before.
+conformal.pred.sl.fast <- function (x,x0,ind_train0,m=1,pred,res, alpha=0.1,w=NULL,type="mean", quantiles = quantiles){
+  # based on tibshiraniri's code, type = either "CQR" or "mean", pred are the point predictions, res are the scores that we will be finding the weighted quantile of
   x = as.matrix(x)
   n = nrow(x)
   n0 = nrow(x0)
   i1=ind_train0
   i2 = (1:n)[-i1]
   res = matrix(res, ncol = m)
-  pred = matrix(pred, ncol=m)
+  
   # res = abs(y[i2] - matrix(predict.fun(out, x[i2, , drop = F]), nrow = n2))
   lo = up = matrix(0, n0, m)
   
   mad.x0 = rep(1, n0)
   
-  weighted.quantile = function(v, prob, w=NULL, sorted=FALSE) {
+  weighted.quantile = function(v, prob, w=NULL, sorted=FALSE){
     if (is.null(w)) w = rep(1,length(v))
     if (!sorted) { o = order(v); v = v[o]; w = w[o] }
     t = pmax(pmin(w, 10), 0.05)
@@ -90,23 +78,44 @@ conformal.pred.sl.fast <- function (x,x0,ind_train0,m=1,pred,res, alpha=0.1,w=NU
     } 
   }
   
-  for (l in 1:m) {
-    
-    o = order(res[, l])
-    r = res[o, l]
-    ww = w[i2][o]
-    for (i in 1:n0) {
-      q = weighted.quantile(c(r, Inf), 1 - alpha, w = c(ww, w[n + i]), sorted = TRUE)
-      lo[i, l] = pred[i, l] - q * mad.x0[i]
-      up[i, l] = pred[i, l] + q * mad.x0[i]
+  
+  if (type == "mean"){
+    pred = matrix(pred, ncol=m)
+    for (l in 1:m) {
+      
+      o = order(res[, l])
+      r = res[o, l]
+      ww = w[i2][o]
+      for (i in 1:n0) {
+        q = weighted.quantile(c(r, Inf), 1 - alpha, w = c(ww, w[n + i]), sorted = TRUE)
+        lo[i, l] = pred[i, l] - q * mad.x0[i]
+        up[i, l] = pred[i, l] + q * mad.x0[i]
+      }
     }
+  }
+  
+  if (type == "CQR"){
+    if (length(quantiles)!=2){print("error: number of quantiles should be 2")}
+    if (m==1){
+      l=1
+      pred = matrix(pred,ncol = 2)
+      o = order(res[, l])
+      r = res[o, l]
+      ww = w[i2][o]
+      for (i in 1:n0) {
+        q = weighted.quantile(c(r, Inf), 1 - alpha, w = c(ww, w[n + i]), sorted = TRUE)
+        lo[i, l] = pred[i, 1] - q * mad.x0[i]
+        up[i, l] = pred[i, 2] + q * mad.x0[i]
+      }
+    }
+  }
+  else{
+    print("error: multidimensional cqr")
   }
   return(list(lo = lo, up = up))
 }
 
 
-
-set.seed(1)
 R = 500
 cov.mat = len.mat = matrix(0,R,2)
 beta.mat1 = beta.mat2 = matrix(0,R,p+1)
@@ -121,7 +130,6 @@ for (j in 1:R) {
   i = sample(N,n)
   x = dat.x[i,]; y = dat.y[i]
   x0 = dat.x[-i,]; y0 = dat.y[-i]
-  
   # Tilting
   i0 = wsample(w(x0))
   
@@ -134,15 +142,7 @@ for (j in 1:R) {
   x_all = rbind(x,x00)
   
   x_tmp = x_all = rbind(x,x00)
-  
-  # x_all[,1] = exp(x_tmp[,1] /2)
-  # x_all[,2] = x_tmp[,2] /(1+exp(x_tmp[,2]))+10
-  # x_all[,3] = (x_tmp[,1]*x_tmp[,3]/25+0.6)^3
-  # x_all[,4] = (x_tmp[,2]+ x_tmp[,4] +20)^2
-  # x = x_all[1:nrow(x),]
-  # x00 = x_all[(1+nrow(x)):(nrow(x00)+nrow(x)),]
-  
-  
+
   t_all = as.factor(c(rep(0,nrow(x)),rep(1,nrow(x00))))
   
   
@@ -161,15 +161,10 @@ for (j in 1:R) {
   x_val0 = x[-ind_train0,]
   y_val0 = y[-ind_train0]
   t_val = t_all[-ind_train]
-  
-  #r=abs(y - x[,1])   #assume the simplest model for r, an arbitrary function of x and y
-  ####use linear regression to estimate r######
-  
   y_train0=y[ind_train0]
   
-  
-  
-  
+  #r=abs(y - x[,1])   #assume the simplest model for r, an arbitrary function of x and y
+  ####use linear regression to estimate r#####
   sl_r = SuperLearner(Y = as.numeric(y_train0), X = data.frame(x_train0),
                       SL.library = method_r)
   
@@ -183,6 +178,7 @@ for (j in 1:R) {
   r_0[-ind_train0]=r_val
   r_append=c(r_val,rep(0,nrow(x00) - length(ind_train1)))
   ########finish r#####
+  # estimate 2 nuisance functions
   m_sl=function(theta,xnew,ytrain,xtrain,method=method_m){
     xnew = data.frame(xnew)
     sl_m = SuperLearner(Y = ytrain, X = data.frame(xtrain), family = binomial(),
@@ -198,9 +194,6 @@ for (j in 1:R) {
     pred = predict(sl_pi, xnew, onlySL = TRUE)
     prob = pmax(pmin(pred$pred[, 1], 0.9), 0.1)
     return(prob/(1-prob))
-    #haha = w(xnew)
-    # haha = rep(60,nrow(xnew))
-    # return(haha)
   }
   
   
@@ -208,8 +201,7 @@ for (j in 1:R) {
   
   
   f= function(theta){ mean(I(t_val==0)*pi_sl(x_val,as.numeric(t_all)-1,x_all,method=method_pi)*(I(r_append<=theta)-m_sl(theta,x_val,as.numeric(r_0<=theta),x,method=method_m))+I(t_val==1)*(m_sl(theta,x_val,as.numeric(r_0<=theta),x,method=method_m)-(1-alpha)) )}
-  #f= function(theta){ mean(I(t_val==0)*pi_np(x_val)*(I(r_val<=theta)-m(rep(theta, nrow(x_val)),x_val))+I(t_val==1)*(m(rep(theta, nrow(x_val)),x_val)-(1-alpha)) )}
-  
+
   rhat = try(uniroot(f,c(1,max(r_0)/2),extendInt = "yes",tol=0.1)$root)
   if(class(rhat)!= "try-error"){
     rhat=rhat
@@ -220,16 +212,6 @@ for (j in 1:R) {
   } 
   
   
-  # aa=bb=110:130
-  # for (i in 1:length(aa)){
-  #   bb[i]=mean(f(aa[i]))
-  #   print(c(aa[i],bb[i]))
-  # }
-  # plot(aa,bb)
-  
-  #out_if_up=rhat+x_test[,1]
-  #out_if_lo=-rhat+x_test[,1]
-  
   pred_r_new = predict(sl_r, data.frame(x00), onlySL = TRUE)
   
   out_if_up=rhat+pred_r_new$pred[,1]
@@ -238,27 +220,21 @@ for (j in 1:R) {
   
   cov.mat[j,1] = mean(out_if_lo <= y00 & y00 <= out_if_up)
   len.mat[j,1] = median(out_if_up - out_if_lo)
-  print(paste("j=",j,"rhat=",rhat,"cov=",cov.mat[j,1],"len=",len.mat[j,1]))
+  print(paste("j=",j,"DRP: rhat=",rhat,"cov=",cov.mat[j,1],"len=",len.mat[j,1]))
   
   up.all[1,j,]=out_if_up
   lo.all[1,j,]=out_if_lo
-  
-  # zy = as.factor(c(rep(0,nrow(x)),rep(1,nrow(x00))))
-  # zx = rbind(as.matrix(x),x00)
-  # obj.glm = glm(zy ~ zx, family="binomial")
-  # prob.glm = predict(obj.glm, type="response")
+
   
   
   wts.glm = pi_sl(x_all,as.numeric(t_all)-1,x_all,method=method_pi)
-  #wts.glm = prob.glm / (1-prob.glm)
-  #beta.mat1[j,] = coef(obj.glm)
   
   #out5 = conformal.pred.split.sl(x, y, x00, w=wts.glm,method=method_r) 
   out = conformal.pred.sl.fast(x,x00, ind_train0,m=1,pred=predict(sl_r, data.frame(x00), onlySL = TRUE)$pred[,1],res=r_val,w=wts.glm)
   
   cov.mat[j,2] = mean(out$lo <= y00 & y00 <= out$up)
   len.mat[j,2] = median(out$up - out$lo)
-  print(paste("cov=",cov.mat[j,2],"len=",len.mat[j,2]))
+  print(paste("WCP: cov=",cov.mat[j,2],"len=",len.mat[j,2]))
   
   up.all[2,j,]=out$up
   lo.all[2,j,]=out$lo 

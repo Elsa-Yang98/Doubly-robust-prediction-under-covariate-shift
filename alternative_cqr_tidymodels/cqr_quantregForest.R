@@ -1,15 +1,15 @@
 rm(list = ls())
 library(randomForest)
-library("conformalInference")
+# library("conformalInference")
 library(SuperLearner)
+library(quantregForest)
+# library(grf)
 alpha=0.1 # target miscoverage level
-N=5000
+N=6000
 n=3000
 p=4
 
-method_r = c("SL.ridge","SL.randomForest")
-#method_r = c("SL.bartMachine","SL.ridge","SL.glm")
-method_pi = c("SL.mean","SL.randomForest","SL.glm","SL.xgboost")
+method_pi = c("SL.mean","SL.randomForest","SL.glm")
 method_m = c("SL.mean","SL.randomForest","SL.glm")
 prop_train=0.5
 
@@ -21,8 +21,6 @@ w = function(x) {
   #expit(x%*% c(-1,0.5,-0.25,-0.1))
   exp(x%*% c(-1,0.5,-0.25,-0.1))
 }
-
-
 
 
 wsample = function(wts, frac=1) {
@@ -107,17 +105,19 @@ conformal.pred.sl.fast <- function (x,x0,ind_train0,m=1,pred,res, alpha=0.1,w=NU
 }
 
 
-
-
-R = 500
+R = 3
+beta_grid = seq(0.01,0.49,len=10)
+cov.grid = len.grid = array(0,dim=c(length(beta_grid),R,2))
 cov.mat = len.mat = matrix(0,R,2)
-beta.mat1 = beta.mat2 = matrix(0,R,p+1)
 up.all = lo.all = array(0,dim=c(2,R,N-n))
 
 beta = c(27.4,13.7,13.7,13.7)
-for (j in 1:R) {
+count = 0
+for (beta_cqr in beta_grid){
+  count = count+1
+  for (j in 1:R) {
   set.seed(j)
-  if (j %% 2 == 0) cat(j,".. ")
+  cat(j,".. ")
   dat.x=matrix(rnorm(N*p),N,p)
   dat.y = 210+dat.x%*%beta+rnorm(N)
   
@@ -134,9 +134,11 @@ for (j in 1:R) {
   x00 = x0[i0,]; y00 = y0[i0]
   
   x_tmp = x_all = rbind(x,x00)
+  
+  
   t_all = as.factor(c(rep(0,nrow(x)),rep(1,nrow(x00))))
   
-  #Use D1 to estimate r, whole data D1 and D2 to estimate two nuisance parameters pi and m, use D2 to evaluation f function
+  
   ind_train0=sample(1:nrow(x),floor(nrow(x)*prop_train))
   ind_train1=sample(1:nrow(x00),floor(nrow(x00)*prop_train))
   ind_train =c(ind_train0,nrow(x)+ind_train1)    
@@ -158,19 +160,25 @@ for (j in 1:R) {
   
   y_train0=y[ind_train0]
   
-  sl_r = SuperLearner(Y = as.numeric(y_train0), X = data.frame(x_train0), SL.library = method_r)
   
-  pred = predict(sl_r, data.frame(x_val0), onlySL = TRUE)
   
-  r_train0 = abs(y_train0-predict(sl_r, data.frame(x_train0), onlySL = TRUE)$pred[,1])
+  quantiles = c(beta_cqr, 1-beta_cqr)
+  # fit_r = grf::quantile_forest(x_train0,y_train0, quantiles = quantiles)
+  fit_r = quantregForest(x_train0,y_train0, what = quantiles)
   
-  r_val = abs(y_val0-pred$pred[,1])
-  r_0=rep(0,nrow(x))
-  r_0[ind_train0]=r_train0
-  r_0[-ind_train0]=r_val
+  
+  quantile_train0 = predict(fit_r, x_train0, what = quantiles)
+  r_train0 = pmax( quantile_train0[,1]- y_train0, y_train0- quantile_train0[,2] )
+  
+  quantile_val = predict(fit_r, x_val0, what = quantiles)
+  r_val = pmax( quantile_val[,1]- y_val0, y_val0- quantile_val[,2] )
+  
+  r_0 = rep(0,nrow(x))
+  r_0[ind_train0] = r_train0
+  r_0[-ind_train0] = r_val
   r_append=c(r_val,rep(0,nrow(x00) - length(ind_train1)))
-  
-  # estimate two nuisance functions
+  ########finish the scores r####
+  # estimate two nuisance functions 
   m_sl=function(theta,xnew,ytrain,xtrain,method=method_m){
     xnew = data.frame(xnew)
     sl_m = SuperLearner(Y = ytrain, X = data.frame(xtrain), family = binomial(),
@@ -189,13 +197,10 @@ for (j in 1:R) {
     return(prob/(1-prob))
   }
   
-  
-  
   f= function(theta){ mean(I(t_val==0)*pi_sl(x_val,as.numeric(t_all)-1,x_all)*(I(r_append<=theta)-m_sl(theta,x_val,as.numeric(r_0<=theta),x))+I(t_val==1)*(m_sl(theta,x_val,as.numeric(r_0<=theta),x)-(1-alpha)) )}
   #f= function(theta){ mean(I(t_val==0)*pi_np(x_val)*(I(r_val<=theta)-m(rep(theta, nrow(x_val)),x_val))+I(t_val==1)*(m(rep(theta, nrow(x_val)),x_val)-(1-alpha)) )}
   
   rhat = try(uniroot(f,c(sort(r_0)[8],max(r_0)/2),extendInt = "yes",tol=0.1)$root)
-  
   if(class(rhat)!= "try-error"){
     rhat=rhat
   }else if (f(max(r_0)/2)>0){
@@ -203,11 +208,11 @@ for (j in 1:R) {
   }else{
     rhat = try(uniroot(f,c(max(r_0)/2,max(r_0)+0.1),tol=0.01)$root)
   } 
-
-  pred_r_new = predict(sl_r, data.frame(x00), onlySL = TRUE)
   
-  out_if_up=rhat+pred_r_new$pred[,1]
-  out_if_lo=-rhat+pred_r_new$pred[,1]
+  pred_r_new = predict(fit_r, x00, what = quantiles)
+  
+  out_if_up=rhat+pred_r_new[,2]
+  out_if_lo=-rhat+pred_r_new[,1]
   
   cov.mat[j,1] = mean(out_if_lo <= y00 & y00 <= out_if_up)
   len.mat[j,1] = median(out_if_up - out_if_lo)
@@ -217,9 +222,8 @@ for (j in 1:R) {
   lo.all[1,j,]=out_if_lo
   
   wts.glm = pi_sl(x_all,as.numeric(t_all)-1,x_all)
-
-  out = conformal.pred.sl.fast(x,x00, ind_train0,m=1,pred=predict(sl_r, data.frame(x00), onlySL = TRUE)$pred[,1],res=r_val,w=wts.glm)
   
+  out = conformal.pred.sl.fast(x,x00, ind_train0,m=1,pred=pred_r_new, res=r_val,w=wts.glm, type ="CQR", quantiles = quantiles)
   
   cov.mat[j,2] = mean(out$lo <= y00 & y00 <= out$up)
   len.mat[j,2] = median(out$up - out$lo)
@@ -230,24 +234,38 @@ for (j in 1:R) {
   print(paste("WCP: cov=",cov.mat[j,2],"len=",len.mat[j,2]))
   
   
+  }
+  cov.grid[count,,] = cov.mat
+  len.grid[count,,] = len.mat
 }
 
-data=list(cov.mat[1:R,],len.mat[1:R,],up.all,lo.all)
-save(data,file="synthetic-500-all_0.9_0.1.rda")
+data = data.frame(apply(len.grid,c(1,3),mean))
+names(data) = c("DRP", "WCP")
+len_mean_df <- data.frame(x = beta_grid,                            # Reshape data frame
+                       y = c(data$DRP, data$WCP),
+                       method = c(rep("DRP", nrow(data)),
+                                 rep("WCP", nrow(data))))
+data = data.frame(apply(cov.grid,c(1,3),mean))
+names(data) = c("DRP", "WCP")
+cov_mean_df <- data.frame(x = beta_grid,                            # Reshape data frame
+                          y = c(data$DRP, data$WCP),
+                          method = c(rep("DRP", nrow(data)),
+                                     rep("WCP", nrow(data))))
 
-RR=R
-A2=len.mat[1:RR,1]
-B2=len.mat[1:RR,2]
-A=cov.mat[1:RR,1]
-B=cov.mat[1:RR,2]
 
-mean(A)
-mean(B)
-sd(A)
-sd(B)
-mean(A2)
-mean(B2)
-sd(A2)
-sd(B2)
+len_plot = ggplot(data = len_mean_df, aes(x, y, col=method)) +
+  geom_line()+
+  ylab("len")+
+  xlab("beta in cqr")
+cov_plot = ggplot(data = cov_mean_df, aes(x, y, col=method)) +
+  geom_line()
+gridExtra::grid.arrange(len_plot, cov_plot, nrow=1)
+
+ggsave(("ggplot_cqr_quantregForest_varying_beta.pdf"),len_plot, width = 3, height = 2, units = "in")
+
+
+
+
+
 
 

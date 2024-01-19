@@ -1,6 +1,5 @@
-#source('conformal.pred.split.sl.R')
-#estimate residuals in DRP and WCP efficiently using SuperLearner
-#Use D1 to estimate r, whole data D1 and D2 to estimate two nuisance parameters pi and m, use D2 to evaluation f function
+library(randomForest)
+library(SuperLearner)
 alpha=0.1
 N=5000
 n=3000
@@ -17,7 +16,6 @@ expit = function(u){
 }
 
 w = function(x) {
-  #expit(x%*% c(-1,0.5,-0.25,-0.1))
   exp(x%*% c(-1,0.5,-0.25,-0.1))
 }
 
@@ -38,27 +36,26 @@ wsample = function(wts, frac=1) {
 
 
 
-## Run the simulation
-library(randomForest)
-library(SuperLearner)
 
-#To source, this is the modified function for the WCP method to train the residuals efficiently using SuperLearner
+
+#This is the modified function for the WCP method to train the residuals efficiently using SuperLearner
 #In their original code they only use least squares to estimate the residuals
-#utilize the prediction and the residuals fitted before
-conformal.pred.sl.fast <- function (x,x0,ind_train0,m=1,pred,res, alpha=0.1,w=NULL){
+#utilize the prediction and the residuals fitted before.
+conformal.pred.sl.fast <- function (x,x0,ind_train0,m=1,pred,res, alpha=0.1,w=NULL,type="mean", quantiles = quantiles){
+  # based on tibshiraniri's code, type = either "CQR" or "mean", pred are the point predictions, res are the scores that we will be finding the weighted quantile of
   x = as.matrix(x)
   n = nrow(x)
   n0 = nrow(x0)
   i1=ind_train0
   i2 = (1:n)[-i1]
   res = matrix(res, ncol = m)
-  pred = matrix(pred, ncol=m)
+  
   # res = abs(y[i2] - matrix(predict.fun(out, x[i2, , drop = F]), nrow = n2))
   lo = up = matrix(0, n0, m)
   
   mad.x0 = rep(1, n0)
   
-  weighted.quantile = function(v, prob, w=NULL, sorted=FALSE) {
+  weighted.quantile = function(v, prob, w=NULL, sorted=FALSE){
     if (is.null(w)) w = rep(1,length(v))
     if (!sorted) { o = order(v); v = v[o]; w = w[o] }
     t = pmax(pmin(w, 10), 0.05)
@@ -72,146 +69,41 @@ conformal.pred.sl.fast <- function (x,x0,ind_train0,m=1,pred,res, alpha=0.1,w=NU
     } 
   }
   
-  for (l in 1:m) {
-    
-    o = order(res[, l])
-    r = res[o, l]
-    ww = w[i2][o]
-    for (i in 1:n0) {
-      q = weighted.quantile(c(r, Inf), 1 - alpha, w = c(ww, w[n + i]), sorted = TRUE)
-      lo[i, l] = pred[i, l] - q * mad.x0[i]
-      up[i, l] = pred[i, l] + q * mad.x0[i]
+  
+  if (type == "mean"){
+    pred = matrix(pred, ncol=m)
+    for (l in 1:m) {
+      
+      o = order(res[, l])
+      r = res[o, l]
+      ww = w[i2][o]
+      for (i in 1:n0) {
+        q = weighted.quantile(c(r, Inf), 1 - alpha, w = c(ww, w[n + i]), sorted = TRUE)
+        lo[i, l] = pred[i, l] - q * mad.x0[i]
+        up[i, l] = pred[i, l] + q * mad.x0[i]
+      }
     }
+  }
+  
+  if (type == "CQR"){
+    if (length(quantiles)!=2){print("error: number of quantiles should be 2")}
+    if (m==1){
+      l=1
+      pred = matrix(pred,ncol = 2)
+      o = order(res[, l])
+      r = res[o, l]
+      ww = w[i2][o]
+      for (i in 1:n0) {
+        q = weighted.quantile(c(r, Inf), 1 - alpha, w = c(ww, w[n + i]), sorted = TRUE)
+        lo[i, l] = pred[i, 1] - q * mad.x0[i]
+        up[i, l] = pred[i, 2] + q * mad.x0[i]
+      }
+    }
+  }
+  else{
+    print("error: multidimensional cqr")
   }
   return(list(lo = lo, up = up))
-}
-
-conformal.pred.sl <- function (x, y, x0, ind_train0, alpha = 0.1, w = NULL,method=c("SL.bartMachine","SL.ridge","SL.glm")) 
-{
-  x = as.matrix(x)
-  y = as.numeric(y)
-  n = nrow(x)
-  p = ncol(x)
-  x0 = matrix(x0, ncol = p)
-  colnames(x0)=colnames(x)
-  n0 = nrow(x0)
-  if (is.null(w)) 
-    w = rep(1, n + n0)
-  
-  
-  i1 = ind_train0
-  
-  i2 = (1:n)[-i1]
-  n1 = length(i1)
-  n2 = length(i2)
-  
-  
-  sl_r =   SuperLearner(Y = as.numeric( y[i1] ), X = data.frame(x[i1, , drop = F]),
-                        SL.library = method)
-  fit = matrix(predict(sl_r, data.frame(x), onlySL = TRUE)$pred[,1],nrow=n)
-  pred = matrix(predict(sl_r, data.frame(x0), onlySL = TRUE)$pred[,1],nrow=n0)
-  
-  res = abs(y[i2] - matrix(predict(sl_r, data.frame(x[i2, , drop = F]), onlySL = TRUE)$pred[,1], nrow = n2))
-  
-  
-  # out = train.fun(x[i1, , drop = F], y[i1])
-  # fit = matrix(predict.fun(out, x), nrow = n)
-  # pred = matrix(predict.fun(out, x0), nrow = n0)
-  m = ncol(pred)
-  
-  # res = abs(y[i2] - matrix(predict.fun(out, x[i2, , drop = F]), nrow = n2))
-  lo = up = matrix(0, n0, m)
-  
-  mad.x0 = rep(1, n0)
-  
-  weighted.quantile = function(v, prob, w=NULL, sorted=FALSE) {
-    if (is.null(w)) w = rep(1,length(v))
-    if (!sorted) { o = order(v); v = v[o]; w = w[o] }
-    t = pmax(pmin(w, 10), 0.05)
-    ww = t/sum(t)
-    i = which(cumsum(ww) >= prob)
-    #if (length(i)==0) return(Inf) # Can happen with infinite weights
-    if(length(i)==1){
-      return(max(v[-length(v)]))
-    }else{
-      return(v[min(i)])
-    } 
-  }
-  
-  for (l in 1:m) {
-    
-    o = order(res[, l])
-    r = res[o, l]
-    ww = w[i2][o]
-    for (i in 1:n0) {
-      q = weighted.quantile(c(r, Inf), 1 - alpha, w = c(ww, w[n + i]), sorted = TRUE)
-      lo[i, l] = pred[i, l] - q * mad.x0[i]
-      up[i, l] = pred[i, l] + q * mad.x0[i]
-    }
-  }
-  return(list(pred = pred, lo = lo, up = up, fit = fit, split = i1))
-}
-
-
-
-conformal.pred.sl <- function (x, y, x0, ind_train0, alpha = 0.1, w = NULL,method=c("SL.bartMachine","SL.ridge","SL.glm")) 
-{
-  x = as.matrix(x)
-  y = as.numeric(y)
-  n = nrow(x)
-  p = ncol(x)
-  x0 = matrix(x0, ncol = p)
-  colnames(x0)=colnames(x)
-  n0 = nrow(x0)
-  if (is.null(w)) 
-    w = rep(1, n + n0)
-  
-  
-  i1 = ind_train0
-  
-  i2 = (1:n)[-i1]
-  n1 = length(i1)
-  n2 = length(i2)
-  
-  
-  sl_r =   SuperLearner(Y = as.numeric( y[i1] ), X = data.frame(x[i1, , drop = F]),
-                        SL.library = method)
-  fit = matrix(predict(sl_r, data.frame(x), onlySL = TRUE)$pred[,1],nrow=n)
-  pred = matrix(predict(sl_r, data.frame(x0), onlySL = TRUE)$pred[,1],nrow=n0)
-  
-  res = abs(y[i2] - matrix(predict(sl_r, data.frame(x[i2, , drop = F]), onlySL = TRUE)$pred[,1], nrow = n2))
-  
-  
-  # out = train.fun(x[i1, , drop = F], y[i1])
-  # fit = matrix(predict.fun(out, x), nrow = n)
-  # pred = matrix(predict.fun(out, x0), nrow = n0)
-  m = ncol(pred)
-  
-  # res = abs(y[i2] - matrix(predict.fun(out, x[i2, , drop = F]), nrow = n2))
-  lo = up = matrix(0, n0, m)
-  
-  mad.x0 = rep(1, n0)
-  
-  weighted.quantile = function(v, prob, w=NULL, sorted=FALSE) {
-    if (is.null(w)) w = rep(1,length(v))
-    if (!sorted) { o = order(v); v = v[o]; w = w[o] }
-    i = which(cumsum(w/sum(w)) >= prob)
-    if (length(i)==0) return(Inf) # Can happen with infinite weights
-    else return(v[min(i)])
-  }
-  
-  for (l in 1:m) {
-    
-    o = order(res[, l])
-    r = res[o, l]
-    ww = w[i2][o]
-    for (i in 1:n0) {
-      q = weighted.quantile(c(r, Inf), 1 - alpha, w = c(ww, w[n + i]), sorted = TRUE)
-      lo[i, l] = pred[i, l] - q * mad.x0[i]
-      up[i, l] = pred[i, l] + q * mad.x0[i]
-    }
-  }
-  return(list(pred = pred, lo = lo, up = up, fit = fit, split = i1))
 }
 
 
@@ -243,16 +135,7 @@ for (j in 1:R) {
   x00 = x0[i0,]; y00 = y0[i0]
   
   x_tmp = x_all = rbind(x,x00)
-  
-  # x_all[,1] = exp(x_tmp[,1] /2)
-  # x_all[,2] = x_tmp[,2] /(1+exp(x_tmp[,2]))+10
-  # x_all[,3] = (x_tmp[,1]*x_tmp[,3]/25+0.6)^3
-  # x_all[,4] = (x_tmp[,2]+ x_tmp[,4] +20)^2
-  # x = x_all[1:nrow(x),]
-  # x00 = x_all[(1+nrow(x)):(nrow(x00)+nrow(x)),]
-  
   t_all = as.factor(c(rep(0,nrow(x)),rep(1,nrow(x00))))
-  
   
   ind_train0=sample(1:nrow(x),floor(nrow(x)*prop_train))
   ind_train1=sample(1:nrow(x00),floor(nrow(x00)*prop_train))
@@ -269,12 +152,10 @@ for (j in 1:R) {
   x_val0 = x[-ind_train0,]
   y_val0 = y[-ind_train0]
   t_val = t_all[-ind_train]
+  y_train0=y[ind_train0]
   
   #r=abs(y - x[,1])   #assume the simplest model for r, an arbitrary function of x and y
   ####use linear regression to estimate r######
-  
-  y_train0=y[ind_train0]
-  
   sl_r = SuperLearner(Y = as.numeric(y_train0), X = data.frame(x_train0), SL.library = method_r)
   
   pred = predict(sl_r, data.frame(x_val0), onlySL = TRUE)
@@ -290,7 +171,7 @@ for (j in 1:R) {
   
   
   ########finish r####
-  
+  # estimate 2 nuisance functions
   m_sl=function(theta,xnew,ytrain,xtrain,method=method_m){
     xnew = data.frame(xnew)
     sl_m = SuperLearner(Y = ytrain, X = data.frame(xtrain), family = binomial(),
@@ -309,19 +190,12 @@ for (j in 1:R) {
     return(prob/(1-prob))
   }
   
-
-  
-  
   pred_r_new = predict(sl_r, data.frame(x00), onlySL = TRUE)
   
  
   wts.glm = pi_sl(x_all,as.numeric(t_all)-1,x_all)
-  #beta.mat1[j,] = coef(obj.glm)
-  
-  #out5 = conformal.pred.split.sl(x, y, x00, w=wts.glm,method=method_r)
-  #out5 = conformal.pred.sl(x, y, x00, ind_train0,w=wts.glm,method=method_r)
+
   out = conformal.pred.sl.fast(x,x00, ind_train0,m=1,pred=predict(sl_r, data.frame(x00), onlySL = TRUE)$pred[,1],res=r_val,w=wts.glm)
-  
   
   cov.mat[j,2] = mean(out$lo <= y00 & y00 <= out$up)
   len.mat[j,2] = median(out$up - out$lo)
@@ -329,7 +203,7 @@ for (j in 1:R) {
   up.all[2,j,]=out$up
   lo.all[2,j,]=out$lo 
   
-  print(paste("cov=",cov.mat[j,2],"len=",len.mat[j,2]))
+  print(paste("WCP: cov=",cov.mat[j,2],"len=",len.mat[j,2]))
   
   
 }
